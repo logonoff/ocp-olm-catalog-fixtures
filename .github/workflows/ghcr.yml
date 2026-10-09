@@ -1,0 +1,83 @@
+name: Build and publish migration fixtures to ghcr.io
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+concurrency:
+  group: ghcr-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_PREFIX: ghcr.io/logonoff/ocp-olm-catalog-fixtures
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Compute image tag
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == release ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+          else
+            TAG=main
+            VERSION="0.1.0-dev.${GITHUB_SHA:0:12}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_TAG=sha-$GITHUB_SHA-$VERSION" >> "$GITHUB_ENV"
+      - name: Test controller and generate bundles
+        run: |
+          go test ./...
+          go run ./cmd/generate --registry "$IMAGE_PREFIX" --version "$VERSION" --image-tag "$BUILD_TAG"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish controller and bundles
+        run: |
+          publish() {
+            local image="$1"
+            local context="$2"
+            local tags=(--tag "$image:$TAG" --tag "$image:$BUILD_TAG")
+            if [[ "$GITHUB_EVENT_NAME" == release ]]; then
+              tags+=(--tag "$image:latest")
+            fi
+            docker buildx build --platform linux/amd64,linux/arm64 --push "${tags[@]}" "$context"
+          }
+          publish "$IMAGE_PREFIX/controller" .
+          for package in console-migration-a console-migration-b console-migration-own-namespace console-migration-no-target; do
+            publish "$IMAGE_PREFIX/$package-bundle" "dist/bundles/$package"
+            docker run --rm \
+              -v "$HOME/.docker/config.json:/auth/config.json:ro" -e REGISTRY_AUTH_FILE=/auth/config.json \
+              quay.io/operator-framework/opm:v1.74.0 render "$IMAGE_PREFIX/$package-bundle:$BUILD_TAG" -o json > "dist/catalogs/source/$package-bundle.json"
+            if [[ "$package" != console-migration-no-target ]]; then
+              cp "dist/catalogs/source/$package-bundle.json" "dist/catalogs/target/$package-bundle.json"
+            fi
+          done
+      - name: Validate and publish source and target catalogs
+        run: |
+          for catalog in source target; do
+            docker run --rm -v "$PWD/dist/catalogs/$catalog:/configs:ro" quay.io/operator-framework/opm:v1.74.0 validate /configs
+            prefix=""
+            if [[ "$catalog" == source ]]; then prefix=source-; fi
+            tags=(--tag "$IMAGE_PREFIX:$prefix$TAG" --tag "$IMAGE_PREFIX:$prefix$BUILD_TAG")
+            if [[ "$GITHUB_EVENT_NAME" == release ]]; then
+              tags+=(--tag "$IMAGE_PREFIX:${prefix}latest")
+            fi
+            docker buildx build --platform linux/amd64,linux/arm64 --push \
+              --file catalog.Dockerfile --build-arg "CATALOG=$catalog" "${tags[@]}" .
+          done
