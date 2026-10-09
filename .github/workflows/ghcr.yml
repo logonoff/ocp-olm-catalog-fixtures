@@ -62,6 +62,7 @@ jobs:
           for package in console-migration-a console-migration-b console-migration-own-namespace console-migration-no-target; do
             publish "$IMAGE_PREFIX/$package-bundle" "dist/bundles/$package"
             docker run --rm \
+              -v "$PWD/.github/containers-policy.json:/etc/containers/policy.json:ro" \
               -v "$HOME/.docker/config.json:/auth/config.json:ro" -e REGISTRY_AUTH_FILE=/auth/config.json \
               quay.io/operator-framework/opm:v1.74.0 render "$IMAGE_PREFIX/$package-bundle:$BUILD_TAG" -o json > "dist/catalogs/source/$package-bundle.json"
             if [[ "$package" != console-migration-no-target ]]; then
