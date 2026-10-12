@@ -26,11 +26,19 @@ Images under `ghcr.io/logonoff/ocp-olm-catalog-fixtures`:
 | `:source-main` | All four packages, served to OLMv0 through a CatalogSource |
 | `:main` | Three packages, served to OLMv1 through a ClusterCatalog |
 
-Each package owns a distinct CRD and has only namespaced RBAC. The controller
-watches its installation namespace. Operand Deployments are owned by their Workload
-custom resources, so removing the CSV does not delete or restart them. After
-migration, creating a second Workload verifies that the OLMv1-managed controller
-still reconciles resources.
+Each package owns a distinct CRD. AllNamespaces fixtures watch Workloads across
+namespaces and have cluster RBAC limited to that package's Workloads and operand
+Deployments. The OwnNamespace fixture watches only its installation namespace and
+uses namespaced RBAC. Operand Deployments are owned by their Workload custom
+resources, so removing the CSV does not delete or restart them. After migration,
+creating another Workload verifies that the OLMv1-managed controller still
+reconciles resources, including operands outside its installation namespace.
+
+Workloads with `spec.enabled: false` create a Deployment with zero replicas. Console
+E2E tests use these probes to record controller reconciliation latency during
+handover without starting additional pods. Publish both catalogs after changing
+the controller or bundle permissions; existing catalog tags reference immutable
+controller and bundle images.
 
 ## Local validation
 

@@ -51,14 +51,21 @@ func generate(name, registry, version, imageTag string) {
 	crd := "workloads." + group
 	labels := object{"app": name}
 	security := object{"allowPrivilegeEscalation": false, "capabilities": object{"drop": []string{"ALL"}}}
+	mode := name != "console-migration-own-namespace"
+	clusterPermissions := []any{}
+	if mode {
+		clusterPermissions = append(clusterPermissions, object{"serviceAccountName": name, "rules": []any{
+			object{"apiGroups": []string{group}, "resources": []string{"workloads"}, "verbs": []string{"get", "list"}},
+			object{"apiGroups": []string{"apps"}, "resources": []string{"deployments"}, "verbs": []string{"get", "create"}},
+		}})
+	}
 	container := object{
 		"name": "controller", "image": image,
-		"env":             []any{object{"name": "POD_NAMESPACE", "valueFrom": object{"fieldRef": object{"fieldPath": "metadata.namespace"}}}, object{"name": "WORKLOAD_GROUP", "value": group}, object{"name": "OPERAND_IMAGE", "value": image}},
+		"env":             []any{object{"name": "POD_NAMESPACE", "valueFrom": object{"fieldRef": object{"fieldPath": "metadata.namespace"}}}, object{"name": "WORKLOAD_GROUP", "value": group}, object{"name": "OPERAND_IMAGE", "value": image}, object{"name": "WATCH_ALL_NAMESPACES", "value": fmt.Sprint(mode)}},
 		"securityContext": security,
 		"readinessProbe":  object{"httpGet": object{"path": "/health", "port": 8000}},
 		"resources":       object{"requests": object{"cpu": "10m", "memory": "16Mi"}, "limits": object{"memory": "64Mi"}},
 	}
-	mode := name != "console-migration-own-namespace"
 	writeJSON(filepath.Join(dir, "manifests", "csv.yaml"), object{
 		"apiVersion": "operators.coreos.com/v1alpha1", "kind": "ClusterServiceVersion",
 		"metadata": object{"name": name + ".v" + version, "annotations": object{"description": "Operator migration E2E fixture", "capabilities": "Basic Install"}},
@@ -68,6 +75,7 @@ func generate(name, registry, version, imageTag string) {
 			"installModes":              []any{object{"type": "OwnNamespace", "supported": true}, object{"type": "SingleNamespace", "supported": true}, object{"type": "MultiNamespace", "supported": false}, object{"type": "AllNamespaces", "supported": mode}},
 			"customresourcedefinitions": object{"owned": []any{object{"name": crd, "version": "v1alpha1", "kind": "Workload", "displayName": "Migration workload", "description": "A stable migration test operand."}}},
 			"install": object{"strategy": "deployment", "spec": object{
+				"clusterPermissions": clusterPermissions,
 				"permissions": []any{object{"serviceAccountName": name, "rules": []any{
 					object{"apiGroups": []string{group}, "resources": []string{"workloads"}, "verbs": []string{"get", "list"}},
 					object{"apiGroups": []string{"apps"}, "resources": []string{"deployments"}, "verbs": []string{"get", "create"}},

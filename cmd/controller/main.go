@@ -20,6 +20,7 @@ import (
 type kubeClient struct {
 	client                               *http.Client
 	base, token, namespace, group, image string
+	allNamespaces                        bool
 }
 
 func main() {
@@ -62,9 +63,10 @@ func newKubeClient() (*kubeClient, error) {
 		return nil, fmt.Errorf("invalid service account CA")
 	}
 	return &kubeClient{
-		client: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}},
-		base:   "https://" + os.Getenv("KUBERNETES_SERVICE_HOST") + ":" + os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS"),
-		token:  strings.TrimSpace(string(token)), namespace: os.Getenv("POD_NAMESPACE"), group: os.Getenv("WORKLOAD_GROUP"), image: os.Getenv("OPERAND_IMAGE"),
+		client:        &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}},
+		base:          "https://" + os.Getenv("KUBERNETES_SERVICE_HOST") + ":" + os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS"),
+		allNamespaces: os.Getenv("WATCH_ALL_NAMESPACES") == "true",
+		token:         strings.TrimSpace(string(token)), namespace: os.Getenv("POD_NAMESPACE"), group: os.Getenv("WORKLOAD_GROUP"), image: os.Getenv("OPERAND_IMAGE"),
 	}, nil
 }
 
@@ -93,7 +95,11 @@ func (c *kubeClient) request(ctx context.Context, method, path string, body any)
 }
 
 func (c *kubeClient) reconcile(ctx context.Context) error {
-	data, status, err := c.request(ctx, http.MethodGet, "/apis/"+c.group+"/v1alpha1/namespaces/"+c.namespace+"/workloads", nil)
+	listPath := "/apis/" + c.group + "/v1alpha1"
+	if !c.allNamespaces {
+		listPath += "/namespaces/" + c.namespace
+	}
+	data, status, err := c.request(ctx, http.MethodGet, listPath+"/workloads", nil)
 	if err != nil {
 		return err
 	}
@@ -101,13 +107,20 @@ func (c *kubeClient) reconcile(ctx context.Context) error {
 		return fmt.Errorf("list workloads: HTTP %d: %s", status, data)
 	}
 	var list struct {
-		Items []struct{ Metadata struct{ Name, UID string } }
+		Items []struct {
+			Metadata struct{ Name, UID, Namespace string }
+			Spec     struct{ Enabled *bool }
+		}
 	}
 	if err := json.Unmarshal(data, &list); err != nil {
 		return err
 	}
 	for _, item := range list.Items {
-		path := "/apis/apps/v1/namespaces/" + c.namespace + "/deployments"
+		namespace := item.Metadata.Namespace
+		if namespace == "" {
+			namespace = c.namespace
+		}
+		path := "/apis/apps/v1/namespaces/" + namespace + "/deployments"
 		_, status, err := c.request(ctx, http.MethodGet, path+"/"+item.Metadata.Name, nil)
 		if err != nil {
 			return err
@@ -118,7 +131,11 @@ func (c *kubeClient) reconcile(ctx context.Context) error {
 		if status != http.StatusNotFound {
 			return fmt.Errorf("get operand: HTTP %d", status)
 		}
-		body := deployment(c.namespace, item.Metadata.Name, item.Metadata.UID, c.group, c.image)
+		body := deployment(namespace, item.Metadata.Name, item.Metadata.UID, c.group, c.image)
+		// Disabled operands still prove reconciliation without starting probe pods.
+		if item.Spec.Enabled != nil && !*item.Spec.Enabled {
+			body["spec"].(map[string]any)["replicas"] = 0
+		}
 		data, status, err := c.request(ctx, http.MethodPost, path, body)
 		if err != nil {
 			return err
